@@ -1,5 +1,9 @@
 name: Release
 
+permissions:
+  contents: write
+  pull-requests: write
+
 on:
   push:
     tags:
@@ -134,10 +138,11 @@ jobs:
                 git checkout "$new_tag"
                 echo "tag=$new_tag" >> $GITHUB_OUTPUT
                 echo "created_tag=false" >> $GITHUB_OUTPUT
+                echo "make_release=true" >> $GITHUB_OUTPUT
                 ;;
                 
               "custom_tag")
-                # Create custom tag
+                # Create custom tag via release action
                 if [ -z "${{ github.event.inputs.custom_tag }}" ]; then
                   echo "Error: custom_tag input is required when release_type is 'custom_tag'"
                   exit 1
@@ -154,13 +159,9 @@ jobs:
                   exit 1
                 fi
                 
-                # Create and push the new tag
-                git config user.name "github-actions[bot]"
-                git config user.email "github-actions[bot]@users.noreply.github.com"
-                git tag "$new_tag"
-                git push origin "$new_tag"
                 echo "tag=$new_tag" >> $GITHUB_OUTPUT
                 echo "created_tag=true" >> $GITHUB_OUTPUT
+                echo "make_release=true" >> $GITHUB_OUTPUT
                 ;;
                 
               "auto_increment"|*)
@@ -191,19 +192,16 @@ jobs:
                   new_tag="v${major}.${minor}.${patch}"
                 fi
                 
-                # Create and push the new tag
-                git config user.name "github-actions[bot]"
-                git config user.email "github-actions[bot]@users.noreply.github.com"
-                git tag "$new_tag"
-                git push origin "$new_tag"
                 echo "tag=$new_tag" >> $GITHUB_OUTPUT
                 echo "created_tag=true" >> $GITHUB_OUTPUT
+                echo "make_release=true" >> $GITHUB_OUTPUT
                 ;;
             esac
           else
             # Tag-triggered release
             echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
             echo "created_tag=false" >> $GITHUB_OUTPUT
+            echo "make_release=true" >> $GITHUB_OUTPUT
           fi
           
       - name: Download all artifacts
