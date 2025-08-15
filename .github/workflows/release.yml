@@ -1,0 +1,259 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'auto_increment'
+        type: choice
+        options:
+          - auto_increment
+          - existing_tag
+          - custom_tag
+      version_type:
+        description: 'Version increment type (for auto_increment)'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      existing_tag:
+        description: 'Existing tag to release (for existing_tag option)'
+        required: false
+        type: string
+      custom_tag:
+        description: 'Custom tag to create (for custom_tag option)'
+        required: false
+        type: string
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            goos: linux
+            goarch: amd64
+          - os: linux
+            arch: arm64
+            goos: linux
+            goarch: arm64
+          - os: darwin
+            arch: amd64
+            goos: darwin
+            goarch: amd64
+          - os: darwin
+            arch: arm64
+            goos: darwin
+            goarch: arm64
+          - os: windows
+            arch: amd64
+            goos: windows
+            goarch: amd64
+            ext: .exe
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          
+      - name: Get dependencies
+        run: go mod tidy
+        
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          binary_name="ask${{ matrix.ext }}"
+          go build -ldflags="-w -s" -o "$binary_name" main.go
+          echo "BINARY_NAME=$binary_name" >> $GITHUB_ENV
+          
+      - name: Create archive
+        run: |
+          archive_name="ask-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
+          tar -czf "$archive_name" "$BINARY_NAME" README.md
+          echo "ARCHIVE_NAME=$archive_name" >> $GITHUB_ENV
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+        
+      - name: Get next version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            case "${{ github.event.inputs.release_type }}" in
+              "existing_tag")
+                # Use existing tag
+                if [ -z "${{ github.event.inputs.existing_tag }}" ]; then
+                  echo "Error: existing_tag input is required when release_type is 'existing_tag'"
+                  exit 1
+                fi
+                new_tag="${{ github.event.inputs.existing_tag }}"
+                
+                # Validate tag exists
+                if ! git tag -l | grep -q "^${new_tag}$"; then
+                  echo "Error: Tag '${new_tag}' does not exist"
+                  echo "Available tags:"
+                  git tag -l | head -10
+                  exit 1
+                fi
+                
+                # Checkout the specific tag
+                git checkout "$new_tag"
+                echo "tag=$new_tag" >> $GITHUB_OUTPUT
+                echo "created_tag=false" >> $GITHUB_OUTPUT
+                ;;
+                
+              "custom_tag")
+                # Create custom tag
+                if [ -z "${{ github.event.inputs.custom_tag }}" ]; then
+                  echo "Error: custom_tag input is required when release_type is 'custom_tag'"
+                  exit 1
+                fi
+                new_tag="${{ github.event.inputs.custom_tag }}"
+                if [[ ! "$new_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  echo "Error: Custom tag must be in format vX.Y.Z (e.g., v1.2.3)"
+                  exit 1
+                fi
+                
+                # Check if tag already exists
+                if git tag -l | grep -q "^${new_tag}$"; then
+                  echo "Error: Tag '${new_tag}' already exists"
+                  exit 1
+                fi
+                
+                # Create and push the new tag
+                git config user.name "github-actions[bot]"
+                git config user.email "github-actions[bot]@users.noreply.github.com"
+                git tag "$new_tag"
+                git push origin "$new_tag"
+                echo "tag=$new_tag" >> $GITHUB_OUTPUT
+                echo "created_tag=true" >> $GITHUB_OUTPUT
+                ;;
+                
+              "auto_increment"|*)
+                # Auto-increment based on version type
+                latest_tag=$(git tag -l "v*" | sort -V | tail -n1)
+                if [ -z "$latest_tag" ]; then
+                  new_tag="v1.0.0"
+                else
+                  # Remove 'v' prefix and split version
+                  version=${latest_tag#v}
+                  IFS='.' read -r major minor patch <<< "$version"
+                  
+                  case "${{ github.event.inputs.version_type }}" in
+                    major)
+                      major=$((major + 1))
+                      minor=0
+                      patch=0
+                      ;;
+                    minor)
+                      minor=$((minor + 1))
+                      patch=0
+                      ;;
+                    patch)
+                      patch=$((patch + 1))
+                      ;;
+                  esac
+                  
+                  new_tag="v${major}.${minor}.${patch}"
+                fi
+                
+                # Create and push the new tag
+                git config user.name "github-actions[bot]"
+                git config user.email "github-actions[bot]@users.noreply.github.com"
+                git tag "$new_tag"
+                git push origin "$new_tag"
+                echo "tag=$new_tag" >> $GITHUB_OUTPUT
+                echo "created_tag=true" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          else
+            # Tag-triggered release
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "created_tag=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: Move artifacts to root
+        run: |
+          find artifacts -name "*.tar.gz" -exec mv {} . \;
+          ls -la *.tar.gz
+          
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          if [ "${{ steps.version.outputs.created_tag }}" == "true" ]; then
+            # For auto-generated tags, create release notes from recent commits
+            previous_tag=$(git tag -l "v*" | sort -V | tail -n2 | head -n1)
+            if [ -n "$previous_tag" ] && [ "$previous_tag" != "${{ steps.version.outputs.tag }}" ]; then
+              echo "## What's Changed" > release_notes.md
+              echo "" >> release_notes.md
+              git log --pretty=format:"- %s (%an)" "${previous_tag}..HEAD" >> release_notes.md
+              echo "" >> release_notes.md
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${previous_tag}...${{ steps.version.outputs.tag }}" >> release_notes.md
+            else
+              echo "## What's Changed" > release_notes.md
+              echo "" >> release_notes.md
+              echo "Initial release of Ask - AI Assistant CLI" >> release_notes.md
+              echo "" >> release_notes.md
+              echo "### Features" >> release_notes.md
+              echo "- Multi-provider support for OpenAI and Google Gemini" >> release_notes.md
+              echo "- Environment-based configuration" >> release_notes.md
+              echo "- Built-in help system" >> release_notes.md
+              echo "- Cross-platform binaries" >> release_notes.md
+            fi
+            echo "use_custom_notes=true" >> $GITHUB_OUTPUT
+          else
+            echo "use_custom_notes=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: ${{ steps.release_notes.outputs.use_custom_notes == 'false' }}
+          body_path: ${{ steps.release_notes.outputs.use_custom_notes == 'true' && 'release_notes.md' || '' }}
+          files: |
+            *.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
